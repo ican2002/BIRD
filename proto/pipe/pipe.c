@@ -119,7 +119,7 @@ pipe_reload_routes(struct channel *C)
 
 
 static void
-pipe_postconfig(struct proto_config *CF)
+pipe_postconfig(struct cf_context *ctx, struct proto_config *CF)
 {
   struct pipe_config *cf = (void *) CF;
   struct channel_config *cc = proto_cf_main_channel(CF);
@@ -197,7 +197,7 @@ pipe_reconfigure(struct proto *P, struct proto_config *CF)
 }
 
 static void
-pipe_copy_config(struct proto_config *dest UNUSED, struct proto_config *src UNUSED)
+pipe_copy_config(struct config *new UNUSED, struct proto_config *dest UNUSED, struct proto_config *src UNUSED)
 {
   /* Just a shallow copy, not many items here */
 }

@@ -111,4 +111,7 @@ extern DOMAIN(the_bird) the_bird_domain;
 /* Thread-local resources available for use without locking */
 extern _Thread_local struct linpool *lp_local;
 
+/* Thread-local resources available for use without locking */
+extern _Thread_local struct linpool *lp_local;
+
 #endif
