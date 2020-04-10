@@ -101,24 +101,16 @@ static_announce_rte(struct static_proto *p, struct static_route *r)
   if (r->state == SRS_CLEAN)
     return;
 
-  /* We skip rta_lookup() here */
   rte e0 = {
     .attrs = a,
     .src = static_get_source(p, r->index),
-  }, *e = &e0;
+    .net = r->net,
+  };
 
   if (r->cmds)
-  {
-    /* Create a temporary table node */
-    e->net = alloca(sizeof(net) + r->net->length);
-    memset(e->net, 0, sizeof(net) + r->net->length);
-    net_copy(e->net->n.addr, r->net);
+    f_eval_rte(r->cmds, &e0, static_lp);
 
-    /* Evaluate the filter */
-    f_eval_rte(r->cmds, &e, static_lp);
-  }
-
-  rte_update(p->p.main_channel, r->net, e);
+  rte_update(p->p.main_channel, &e0);
   r->state = SRS_CLEAN;
 
   if (r->cmds)
@@ -367,7 +359,7 @@ static_bfd_notify(struct bfd_request *req)
 }
 
 static int
-static_rte_better(rte *new, rte *old)
+static_rte_better(struct rte_storage *new, struct rte_storage *old)
 {
   u32 n = ea_get_int(new->attrs->eattrs, EA_GEN_IGP_METRIC, IGP_METRIC_UNKNOWN);
   u32 o = ea_get_int(old->attrs->eattrs, EA_GEN_IGP_METRIC, IGP_METRIC_UNKNOWN);
@@ -375,7 +367,7 @@ static_rte_better(rte *new, rte *old)
 }
 
 static int
-static_rte_mergable(rte *pri, rte *sec)
+static_rte_mergable(struct rte_storage *pri, struct rte_storage *sec)
 {
   u32 a = ea_get_int(pri->attrs->eattrs, EA_GEN_IGP_METRIC, IGP_METRIC_UNKNOWN);
   u32 b = ea_get_int(sec->attrs->eattrs, EA_GEN_IGP_METRIC, IGP_METRIC_UNKNOWN);
@@ -668,7 +660,7 @@ static_copy_config(struct proto_config *dest, struct proto_config *src)
 }
 
 static void
-static_get_route_info(rte *rte, byte *buf)
+static_get_route_info(rte *rte, struct rte_storage *es UNUSED, byte *buf)
 {
   eattr *a = ea_find(rte->attrs->eattrs, EA_GEN_IGP_METRIC);
   if (a)
