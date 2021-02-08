@@ -2174,6 +2174,15 @@ io_init(void)
 static int short_loops = 0;
 #define SHORT_LOOP_MAX 10
 
+static int poll_reload_pipe[2];
+
+void
+io_loop_reload(void)
+{
+  char b;
+  write(poll_reload_pipe[1], &b, 1);
+}
+
 void
 io_loop(void)
 {
@@ -2184,6 +2193,9 @@ io_loop(void)
   node *n;
   int fdmax = 256;
   struct pollfd *pfd = xmalloc(fdmax * sizeof(struct pollfd));
+
+  if (pipe(poll_reload_pipe) < 0)
+    die("pipe(poll_reload_pipe) failed: %m");
 
   watchdog_start1();
   for(;;)
@@ -2202,7 +2214,12 @@ io_loop(void)
 	poll_tout = MIN(poll_tout, timeout);
       }
 
-      nfds = 0;
+      /* A hack to reload main io_loop() when something has changed asynchronously. */
+      pfd[0].fd = poll_reload_pipe[0];
+      pfd[0].events = POLLIN;
+
+      nfds = 1;
+
       WALK_LIST(n, sock_list)
 	{
 	  pfd[nfds] = (struct pollfd) { .fd = -1 }; /* everything other set to 0 by this */
@@ -2274,6 +2291,14 @@ io_loop(void)
 	}
       if (pout)
 	{
+	  if (pfd[0].revents & POLLIN)
+	  {
+	    /* IO loop reload requested */
+	    char b;
+	    read(poll_reload_pipe[0], &b, 1);
+	    continue;
+	  }
+
 	  times_update(&main_timeloop);
 
 	  /* guaranteed to be non-empty */

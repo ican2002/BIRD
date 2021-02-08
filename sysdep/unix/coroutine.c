@@ -17,7 +17,14 @@
 
 #include "lib/birdlib.h"
 #include "lib/locking.h"
+#include "lib/coro.h"
 #include "lib/resource.h"
+#include "lib/timer.h"
+
+/* Using a rather big stack for coroutines to allow for stack-local allocations.
+ * In real world, the kernel doesn't alloc this memory until it is used.
+ * */
+#define CORO_STACK_SIZE	1048576
 
 /*
  *	Implementation of coroutines based on POSIX threads
@@ -100,3 +107,138 @@ void do_unlock(struct domain_generic *dg, struct domain_generic **lsp)
   pthread_mutex_unlock(&dg->mutex);
 }
 
+/* Coroutines */
+struct coroutine {
+  resource r;
+  pthread_t id;
+  pthread_attr_t attr;
+  sem_t finished;
+  void (*entry)(void *);
+  void *data;
+  _Bool detached;
+};
+
+static void coro_free(resource *r)
+{
+  struct coroutine *c = (void *) r;
+
+  if (!c->detached)
+  {
+    int e = sem_wait(&c->finished);
+
+    if (e != 0)
+      switch (errno)
+      {
+	/* Try once more. */
+	case EINTR:
+	  return coro_free(r);
+
+	/* Crash. */
+	default:
+	  die("sem_wait() failed: %m");
+      }
+
+    void *cr = NULL;
+    pthread_join(c->id, &cr);
+    ASSERT_DIE(cr == (void *) c);
+  }
+
+  c->entry = NULL;
+  pthread_attr_destroy(&c->attr);
+  sem_destroy(&c->finished);
+}
+
+void
+coro_self_done(struct coroutine *c)
+{
+  ASSERT_DIE(pthread_equal(c->id, pthread_self()));
+
+  pthread_detach(c->id);
+  c->detached = 1;
+  rfree(&c->r);
+}
+
+
+static struct resclass coro_class = {
+  .name = "Coroutine",
+  .size = sizeof(struct coroutine),
+  .free = coro_free,
+};
+
+extern pthread_key_t current_time_key;
+
+static void *coro_entry(void *p)
+{
+  struct coroutine *c = p;
+  ASSERT_DIE(c->entry);
+
+  pthread_setspecific(current_time_key, &main_timeloop);
+
+  c->entry(c->data);
+
+  if (sem_post(&c->finished))
+    die("sem_post() failed: %m");
+
+  return p;
+}
+
+struct coroutine *coro_run(pool *p, void (*entry)(void *), void *data)
+{
+  ASSERT_DIE(entry);
+  ASSERT_DIE(p);
+
+  struct coroutine *c = ralloc(p, &coro_class);
+
+  c->detached = 0;
+
+  c->entry = entry;
+  c->data = data;
+
+  int e = 0;
+
+  if (e = sem_init(&c->finished, 0, 0))
+    die("sem_init() failed: %m");
+
+  if (e = pthread_attr_init(&c->attr))
+    die("pthread_attr_init() failed: %M", e);
+
+  if (e = pthread_attr_setstacksize(&c->attr, CORO_STACK_SIZE))
+    die("pthread_attr_setstacksize(%u) failed: %M", CORO_STACK_SIZE, e);
+
+  if (e = pthread_create(&c->id, &c->attr, coro_entry, c))
+    die("pthread_create() failed: %M", e);
+
+  return c;
+}
+
+_Bool coro_finished(struct coroutine *c)
+{
+  ASSERT_DIE(c);
+  ASSERT_DIE(c->entry);
+
+  int e = sem_trywait(&c->finished);
+
+  if (e == 0)
+  {
+    /* Finished. */
+    if (sem_post(&c->finished))
+      die("sem_post() failed: %m");
+
+    return 1;
+  }
+
+  switch (errno)
+  {
+    /* Not finished yet. */
+    case EAGAIN:
+      return 0;
+
+    /* Try once more. */
+    case EINTR:
+      return coro_finished(c);
+
+    /* Crash. */
+    default:
+      die("sem_trywait() failed: %m");
+  }
+}

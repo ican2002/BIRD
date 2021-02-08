@@ -9,12 +9,6 @@
 #ifndef _BIRD_LOCKING_H_
 #define _BIRD_LOCKING_H_
 
-/* Init on BIRD startup */
-void coro_init(void);
-
-/* Init on BIRD startup after resources are inited */
-void coro_resource_init(void);
-
 /* Locking */
 struct domain_generic;
 
@@ -51,7 +45,7 @@ struct domain_generic *domain_new(const char *name);
 #define SUPER_LOCK(type)  ({ ASSERT_DIE(IS_LOCKED(type)); (DOMAIN(type)) { .type = locking_stack.type }; })
 
 /* Uncoupled lock/unlock, don't use directly */
-#define LOCK_DOMAIN(type, d)	LOCKED(type) = (do_lock(((d).type), &(locking_stack.type)) ? (d) : (DOMAIN(type)) {})
+#define LOCK_DOMAIN(type, d)	LOCKED(type) = (do_lock(((d).type), &(locking_stack.type)), (d))
 #define UNLOCK_DOMAIN(type, d)  do_unlock(((d).type), &(locking_stack.type))
 
 /* Do something in a locked context; run cleanup if unsuccessful */
