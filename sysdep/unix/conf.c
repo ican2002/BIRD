@@ -17,8 +17,11 @@
 #include <unistd.h>
 
 #include "nest/bird.h"
+#include "lib/coro.h"
+#include "lib/locking.h"
 #include "conf/conf.h"
 #include "conf/parser.h"
+#include "sysdep/unix/unix.h"
 
 #ifdef PATH_IPROUTE_DIR
 
@@ -308,47 +311,36 @@ read_config(void)
   return unix_read_config(config_name, unix_cf_error_die);
 }
 
+static struct reconfig_coro {
+  const char *name;
+  int type;
+  uint timeout;
+  struct coroutine *coro;
+  cli *cli;
+  cf_error_type err;
+} *current_reconfig_coro;
+
+static _Thread_local struct reconfig_coro *local_reconfig_coro;
+
 static void
 unix_cf_error_log(struct conf_order *order, const char *msg, va_list args)
 {
   log(L_ERR "%s, line %u: %V", order->state->name, order->state->lino, msg, &args);
 }
 
-void
-async_config(void)
-{
-  log(L_INFO "Reconfiguration requested by SIGHUP");
-  struct config *conf = unix_read_config(config_name, unix_cf_error_log);
-
-  if (conf)
-    config_commit(conf, RECONFIG_HARD, 0);
-}
-
 static void
 unix_cf_error_cli(struct conf_order *order, const char *msg, va_list args)
 {
-  cli_msg(8002, "%s, line %d: %s", order->state->name, order->state->lino, msg, &args);
-}
-
-static struct config *
-cmd_read_config(const char *name)
-{
-  if (!name)
-    name = config_name;
-
-  cli_msg(-2, "Reading configuration from %s", name);
-  return unix_read_config(name, unix_cf_error_cli);
-}
-
-void
-cmd_check_config(const char *name)
-{
-  struct config *conf = cmd_read_config(name);
-  if (!conf)
-    return;
-
-  cli_msg(20, "Configuration OK");
-  config_free(conf);
+  LOCKED_DO(the_bird, the_bird_domain)
+  {
+    cli *c = local_reconfig_coro->cli;
+    if (c)
+    {
+      cli_printf(c, 8002, "%s, line %d: %s", order->state->name, order->state->lino, msg, &args);
+      cli_write_trigger(c);
+      io_loop_reload();
+    }
+  }
 }
 
 static void
@@ -382,24 +374,119 @@ cmd_reconfig_undo_notify(void)
 }
 
 void
+reconfig_coro(void *data)
+{
+  struct reconfig_coro *rc = local_reconfig_coro = data;
+
+  struct config *conf = unix_read_config(rc->name, rc->err);
+  if (!conf)
+    return;
+
+  LOCKED_DO(the_bird, the_bird_domain)
+  {
+    this_cli = rc->cli;
+
+    switch (rc->type)
+    {
+      case RECONFIG_IGNORE:
+	ASSERT_DIE(this_cli == NULL);
+	config_free(conf);
+	break;
+
+      case RECONFIG_NONE:
+	config_free(conf);
+	if (this_cli)
+	{
+	  cli_msg(20, "Configuration OK");
+	  cli_write_trigger(this_cli);
+	  this_cli->cont = NULL;
+	}
+	break;
+
+      default:
+	{
+	  if (this_cli)
+	  {
+	    cli_msg(-20, "Configuration parsed OK, applying.");
+	    cli_write_trigger(this_cli);
+	  }
+
+	  int r = config_commit(conf, rc->type, rc->timeout);
+
+	  if ((r >= 0) && (rc->timeout > 0) && this_cli)
+	  {
+	    cmd_reconfig_stored_cli = this_cli;
+	    cli_msg(-22, "Undo scheduled in %d s", rc->timeout);
+	  }
+
+	  if (this_cli)
+	  {
+	    cmd_reconfig_msg(r);
+	    cli_write_trigger(this_cli);
+	    this_cli->cont = NULL;
+	  }
+	}
+    }
+
+    if (rc == current_reconfig_coro)
+      current_reconfig_coro = NULL;
+
+    coro_self_done(rc->coro);
+    mb_free(rc);
+    io_loop_reload();
+  }
+}
+
+static void
+cmd_reconfig_cont(cli *c UNUSED)
+{}
+
+void
+run_reconfig(cli *c, const char *name, int type, uint timeout)
+{
+  if (current_reconfig_coro)
+  {
+    current_reconfig_coro->type = RECONFIG_IGNORE;
+
+    if (current_reconfig_coro->cli)
+    {
+      current_reconfig_coro->cli->cont = NULL;
+      cli_printf(current_reconfig_coro->cli, 26, "Reconfiguration cancelled");
+      cli_write_trigger(current_reconfig_coro->cli);
+      current_reconfig_coro->cli = NULL;
+    }
+  }
+
+  if (c)
+    cli_printf(c, -2, "Reading configuration from %s", name);
+
+  current_reconfig_coro = mb_alloc(&root_pool, sizeof(struct reconfig_coro));
+  current_reconfig_coro->name = name;
+  current_reconfig_coro->type = type;
+  current_reconfig_coro->timeout = timeout;
+  current_reconfig_coro->cli = c;
+  current_reconfig_coro->err = c ? unix_cf_error_cli : unix_cf_error_log;
+
+  if (c)
+    c->cont = cmd_reconfig_cont;
+
+  current_reconfig_coro->coro = coro_run(&root_pool, reconfig_coro, current_reconfig_coro);
+}
+
+void
+async_config(void)
+{
+  log(L_INFO "Reconfiguration requested by SIGHUP");
+  run_reconfig(NULL, config_name, RECONFIG_HARD, 0);
+}
+
+void
 cmd_reconfig(const char *name, int type, uint timeout)
 {
   if (cli_access_restricted())
     return;
 
-  struct config *conf = cmd_read_config(name);
-  if (!conf)
-    return;
-
-  int r = config_commit(conf, type, timeout);
-
-  if ((r >= 0) && (timeout > 0))
-    {
-      cmd_reconfig_stored_cli = this_cli;
-      cli_msg(-22, "Undo scheduled in %d s", timeout);
-    }
-
-  cmd_reconfig_msg(r);
+  run_reconfig(this_cli, name ? name : config_name, type, timeout);
 }
 
 void

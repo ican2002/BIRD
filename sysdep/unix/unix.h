@@ -24,7 +24,6 @@ extern int parse_and_exit;
 void async_config(void);
 void async_dump(void);
 void async_shutdown(void);
-void cmd_check_config(const char *name);
 void cmd_reconfig(const char *name, int type, uint timeout);
 void cmd_reconfig_confirm(void);
 void cmd_reconfig_undo(void);

@@ -130,6 +130,7 @@ void order_shutdown(int gr);
 #define RECONFIG_HARD	1
 #define RECONFIG_SOFT	2
 #define RECONFIG_UNDO	3
+#define RECONFIG_IGNORE	4
 
 #define CONF_DONE	0
 #define CONF_PROGRESS	1
