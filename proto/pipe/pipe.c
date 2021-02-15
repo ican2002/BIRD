@@ -169,6 +169,7 @@ pipe_configure_channels(struct pipe_proto *p, struct pipe_config *cf)
     .out_filter = cc->out_filter,
     .in_limit = cc->in_limit,
     .ra_mode = RA_ANY,
+    .rpki_reload = cc->rpki_reload,
   };
 
   struct channel_config sec_cf = {
@@ -178,6 +179,7 @@ pipe_configure_channels(struct pipe_proto *p, struct pipe_config *cf)
     .out_filter = cc->in_filter,
     .in_limit = cc->out_limit,
     .ra_mode = RA_ANY,
+    .rpki_reload = cc->rpki_reload,
   };
 
   return

@@ -89,7 +89,7 @@ proto_postconfig(struct cf_context *ctx)
 
 CF_DECLS
 
-CF_KEYWORDS(ROUTER, ID, PROTOCOL, TEMPLATE, PREFERENCE, DISABLED, DEBUG, ALL, OFF, DIRECT, PIPE)
+CF_KEYWORDS(ROUTER, ID, HOSTNAME, PROTOCOL, TEMPLATE, PREFERENCE, DISABLED, DEBUG, ALL, OFF, DIRECT, PIPE)
 CF_KEYWORDS(INTERFACE, IMPORT, EXPORT, FILTER, NONE, VRF, DEFAULT, TABLE, STATES, ROUTES, FILTERS)
 CF_KEYWORDS(IPV4, IPV6, VPN4, VPN6, ROA4, ROA6, FLOW4, FLOW6, SADR, MPLS)
 CF_KEYWORDS(RECEIVE, LIMIT, ACTION, WARN, BLOCK, RESTART, DISABLE, KEEP, FILTERED)
@@ -152,6 +152,10 @@ idval:
        cf_error("Number or IPv4 address constant expected");
    }
  ;
+
+conf: hostname_override ;
+
+hostname_override: HOSTNAME text ';' { ctx->new_config->hostname = $2; } ;
 
 conf: gr_opts ;
 
@@ -263,6 +267,7 @@ channel_item_:
  | EXPORT LIMIT limit_spec { ctx->this_channel->out_limit = $3; }
  | PREFERENCE expr { ctx->this_channel->preference = $2; check_u16(ctx, $2); }
  | IMPORT KEEP FILTERED bool { ctx->this_channel->in_keep_filtered = $4; }
+ | RPKI RELOAD bool { ctx->this_channel->rpki_reload = $3; }
  ;
 
 /* To avoid grammar collision in Pipe protocol */

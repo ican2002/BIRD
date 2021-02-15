@@ -515,6 +515,7 @@ int parse_and_exit;
 char *bird_name;
 void async_dump(void) {}
 void async_shutdown(void) {}
+char *get_hostname(linpool *lp UNUSED) { return NULL; }
 void cmd_graceful_restart(void) {}
 void cmd_shutdown(void) {}
 

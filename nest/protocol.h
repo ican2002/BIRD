@@ -493,6 +493,7 @@ struct channel_config {
   u32 debug;				/* Debugging flags (D_*) */
   u8 merge_limit;			/* Maximal number of nexthops for RA_MERGED */
   u8 in_keep_filtered;			/* Routes rejected in import filter are kept */
+  u8 rpki_reload;			/* RPKI changes trigger channel reload */
 };
 
 struct channel {
@@ -542,10 +543,15 @@ struct channel {
   struct fib_iterator reload_fit;	/* FIB iterator in in_table used during reloading */
   struct rte_storage *reload_next_rte;	/* Route iterator in in_table used during reloading */
   u8 reload_active;			/* Iterator reload_fit is linked */
+  u8 reload_pending;			/* Reloading and another reload is scheduled */
+  u8 refeed_pending;			/* Refeeding and another refeed is scheduled */
+  u8 rpki_reload;			/* RPKI changes trigger channel reload */
 
   list net_feed;			/* Active net feeders (struct channel_net_feed) */
 
   struct rtable *out_table;		/* Internal table for exported routes */
+
+  list roa_subscriptions;		/* List of active ROA table subscriptions based on filters roa_check() */
 };
 
 struct channel_net_feed {
