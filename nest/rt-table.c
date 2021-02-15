@@ -342,8 +342,6 @@ struct rte_export_internal {
   u32 refeed:1;
 };
 
-//_Thread_local static struct rte_export_internal rei;
-
 static int				/* Actually better or at least as good as */
 rte_better(struct rte_storage *new, struct rte_storage *old)
 {
