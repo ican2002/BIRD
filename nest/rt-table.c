@@ -924,6 +924,32 @@ rte_same(struct rte_storage *x, rte *y, _Bool fy)
     rte_is_filtered(x) == fy;
 }
 
+static struct rte_storage *
+rte_recalc_find_best(struct rte_storage *new)
+{
+  if (!new)
+    return NULL;
+
+  struct rte_storage **bp = &new;
+  for (struct rte_storage **k=&(*bp)->next; *k; k=&(*k)->next)
+    if (rte_better(*k, *bp))
+      bp = k;
+
+  /* And relink it */
+  struct rte_storage *best = *bp;
+  *bp = best->next;
+  best->next = new;
+  return best;
+}
+
+static void
+rt_maybe_schedule_prune(struct rtable *table, uint count)
+{
+  if (((table->gc_counter += count) >= table->config->gc_max_ops) &&
+      (table->gc_time + table->config->gc_min_time <= current_time()))
+    rt_schedule_prune(table);
+}
+
 static void NONNULL(1,2)
 rte_recalculate(net *net, struct rte_storage *new, struct rte_storage *old, struct rte_storage **before_old)
 {
@@ -1014,19 +1040,7 @@ rte_recalculate(net *net, struct rte_storage *new, struct rte_storage *old, stru
 	    }
 
 	  /* Find a new optimal route (if there is any) */
-	  if (net->routes)
-	    {
-	      struct rte_storage **bp = &net->routes;
-	      for (struct rte_storage **k=&(*bp)->next; *k; k=&(*k)->next)
-		if (rte_better(*k, *bp))
-		  bp = k;
-
-	      /* And relink it */
-	      struct rte_storage *best = *bp;
-	      *bp = best->next;
-	      best->next = net->routes;
-	      net->routes = best;
-	    }
+	  net->routes = rte_recalc_find_best(net->routes);
 	}
       else if (new->attrs)
 	{
@@ -1073,10 +1087,8 @@ rte_recalculate(net *net, struct rte_storage *new, struct rte_storage *old, stru
   /* Propagate the route change */
   rte_announce(table, net, new, old, net->routes, old_best);
 
-  if (!net->routes &&
-      (table->gc_counter++ >= table->config->gc_max_ops) &&
-      (table->gc_time + table->config->gc_min_time <= current_time()))
-    rt_schedule_prune(table);
+  if (!net->routes)
+    rt_maybe_schedule_prune(table, 1);
 
   if (old_ok && p->rte_remove)
     p->rte_remove(net, old);
@@ -1898,17 +1910,99 @@ rte_recalc_sort(struct rte_storage *chain)
   return best;
 }
 
+
 static inline int
-rt_next_hop_update_net(net *n)
+rt_next_hop_update_net(rtable *tab, net *n)
 {
+  /* Get how many of them are affected */
   uint count = 0;
   for (struct rte_storage **k = &n->routes, *e; e = *k; k = &e->next)
-    if (rta_next_hop_outdated(e->attrs))
-      {
-	struct rte_storage *new = rt_next_hop_update_rte(e);
-	rte_recalculate(n, new, e, k);
-	count++;
-      }
+    if (rte_is_valid(e) && rta_next_hop_outdated(e->attrs))
+      count++;
+
+  if (!count)
+    return 0;
+
+  /* Get the changes */
+  struct rte_multiupdate {
+    struct rte_storage *new, *old, **before_old;
+  } *updates = alloca(sizeof(struct rte_multiupdate) * count);
+
+  uint i = 0;
+  for (struct rte_storage **k = &n->routes, *e; e = *k; k = &e->next)
+    if (rte_is_valid(e) && rta_next_hop_outdated(e->attrs))
+      updates[i++] = (struct rte_multiupdate) {
+	.new = rt_next_hop_update_rte(e),
+	.old = e,
+	.before_old = k,
+      };
+
+  ASSERT_DIE(i == count);
+
+  /* One change is equivalent to standard recalculate */
+  if (count == 1)
+  {
+    rte_recalculate(n, updates[0].new, updates[0].old, updates[0].before_old);
+    return 1;
+  }
+
+  /* Keep the old best pointer for now */
+  struct rte_storage *old_best = n->routes;
+
+  /* Replace all the routes */
+  for (uint i=0; i<count; i++)
+  {
+    /* Get new IDs for them */
+    updates[i].new->id = hmap_first_zero(&tab->id_map);
+    hmap_set(&tab->id_map, updates[i].new->id);
+
+    /* Set the lastmod */
+    updates[i].new->lastmod = current_time();
+
+    if (i && (updates[i].before_old == &(updates[i-1].old->next)))
+    {
+      /* Adjacent to the previous changed one */
+      ASSERT(updates[i-1].new->next == updates[i].old);
+      updates[i-1].new->next = updates[i].new;
+      updates[i].new->next = updates[i].old->next;
+    }
+    else
+    {
+      /* The previous route has not been changed */
+      ASSERT(*updates[i].before_old == updates[i].old);
+      *updates[i].before_old = updates[i].new;
+      updates[i].new->next = updates[i].old->next;
+    }
+
+    rte new_copy = rte_copy(updates[i].new);
+    rte_trace(updates[i].new->sender, &new_copy, '~', "recursive hexthop update");
+  }
+
+  /* More changes, replace all of them, trigger one recalculate */
+  if (tab->config->sorted)
+    n->routes = rte_recalc_sort(n->routes);
+
+  else
+  {
+    for (uint i=0; i<count; i++)
+      if (updates[i].new->src->proto->rte_recalculate)
+	updates[i].new->src->proto->rte_recalculate(tab, n, updates[i].new, updates[i].old, old_best);
+
+    n->routes = rte_recalc_find_best(n->routes);
+  }
+
+  rte best_copy = rte_copy(n->routes);
+  rte_trace(best_copy.sender, &best_copy, '~',
+      (n->routes == old_best) ? "best not changed" : "best chosen");
+
+  /* First announce all the non-old-best changes */
+  for (uint i=1; i<count; i++)
+    rte_announce(tab, n, updates[i].new, updates[i].old, old_best, old_best);
+
+  /* Then announce the old best change */
+  rte_announce(tab, n, updates[0].new, updates[0].old, n->routes, old_best);
+
+  rt_maybe_schedule_prune(tab, count);
 
   return count;
 }
@@ -1936,7 +2030,7 @@ rt_next_hop_update(rtable *tab)
 	  ev_schedule(tab->rt_event);
 	  return;
 	}
-      max_feed -= rt_next_hop_update_net(n);
+      max_feed -= rt_next_hop_update_net(tab, n);
     }
   FIB_ITERATE_END;
 
