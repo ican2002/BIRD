@@ -51,8 +51,8 @@ struct filter {
 
 struct rte;
 
-enum filter_return f_run(const struct filter *filter, struct rte **rte, struct linpool *tmp_pool, int flags);
-enum filter_return f_eval_rte(const struct f_line *expr, struct rte **rte, struct linpool *tmp_pool);
+enum filter_return f_run(const struct filter *filter, struct rte *rte, struct linpool *tmp_pool, int flags);
+enum filter_return f_eval_rte(const struct f_line *expr, struct rte *rte, struct linpool *tmp_pool);
 uint f_eval_int(struct cf_context *ctx, const struct f_line *expr);
 enum filter_return f_eval_buf(const struct f_line *expr, struct linpool *tmp_pool, buffer *buf);
 
@@ -67,6 +67,8 @@ void filters_dump_all(void);
 #define FILTER_ACCEPT NULL
 #define FILTER_REJECT ((struct filter *) 1)
 #define FILTER_UNDEF  ((struct filter *) 2)	/* Used in BGP */
+
+#define TRIVIAL_FILTER(f)   (((f) == FILTER_REJECT) || ((f) == FILTER_ACCEPT))
 
 #define FF_SILENT 2			/* Silent filter execution */
 

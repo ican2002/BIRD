@@ -24,6 +24,9 @@ struct kif_proto;
 #define EA_KRT_SOURCE	EA_CODE(PROTOCOL_KERNEL, 0)
 #define EA_KRT_METRIC	EA_CODE(PROTOCOL_KERNEL, 1)
 
+#define KRT_REF_SEEN	0x1	/* Seen in table */
+#define KRT_REF_BEST	0x2	/* Best in table */
+
 /* Whenever we recognize our own routes, we allow learing of foreign routes */
 
 #ifdef CONFIG_SELF_CONSCIOUS
@@ -75,15 +78,15 @@ extern pool *krt_pool;
     { log(L_TRACE "%s: " msg, pr->p.name , ## args); } } while(0)
 
 void kif_request_scan(void);
-void krt_got_route(struct krt_proto *p, struct rte *e);
-void krt_got_route_async(struct krt_proto *p, struct rte *e, int new);
+void krt_got_route(struct krt_proto *p, struct rte *e, s8 src);
+void krt_got_route_async(struct krt_proto *p, struct rte *e, int new, s8 src);
 
 static inline int
-krt_get_sync_error(struct krt_proto *p, struct rte *e)
+krt_get_sync_error(struct krt_proto *p, u32 id)
 {
   return (p->p.proto_state == PS_UP) &&
-    bmap_test(&p->p.main_channel->export_map, e->id) &&
-    !bmap_test(&p->sync_map, e->id);
+    bmap_test(&p->p.main_channel->export_map, id) &&
+    !bmap_test(&p->sync_map, id);
 }
 
 void krt_check_scan_time(struct cf_context *ctx, struct krt_config *cf);
@@ -140,7 +143,7 @@ void krt_sys_copy_config(struct krt_config *, struct krt_config *);
 
 int  krt_capable(rte *e);
 void krt_do_scan(struct krt_proto *);
-void krt_replace_rte(struct krt_proto *p, net *n, rte *new, rte *old);
+void krt_replace_rte(struct krt_proto *p, struct rte_export *e);
 int krt_sys_get_attr(const eattr *a, byte *buf, int buflen);
 
 

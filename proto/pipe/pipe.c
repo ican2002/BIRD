@@ -41,69 +41,58 @@
 #include "filter/filter.h"
 #include "lib/string.h"
 
+#ifdef CONFIG_BGP
+#include "proto/bgp/bgp.h"
+#endif
+
 #include "pipe.h"
 
 static void
-pipe_rt_notify(struct proto *P, struct channel *src_ch, net *n, rte *new, rte *old)
+pipe_rt_notify(struct channel *src_ch, struct rte_export *export)
 {
-  struct pipe_proto *p = (void *) P;
+  struct pipe_proto *p = (void *) src_ch->proto;
   struct channel *dst = (src_ch == p->pri) ? p->sec : p->pri;
-  struct rte_src *src;
 
-  rte *e;
-  rta *a;
-
-  if (!new && !old)
+  if (rte_export_kind(export) == REX_NOTHING)
     return;
 
-  if (dst->table->pipe_busy)
-    {
-      log(L_ERR "Pipe loop detected when sending %N to table %s",
-	  n->n.addr, dst->table->name);
-      return;
-    }
+  const net_addr *net = export->new.attrs ? export->new.net : export->old.net;
 
-  if (new)
+  if (export->new.attrs)
     {
-      a = alloca(rta_size(new->attrs));
-      memcpy(a, new->attrs, rta_size(new->attrs));
+      rta *a = alloca(rta_size(export->new.attrs));
+      memcpy(a, export->new.attrs, rta_size(export->new.attrs));
 
-      a->aflags = 0;
+      a->cached = 0;
+      a->uc = 0;
       a->hostentry = NULL;
-      e = rte_get_temp(a);
-      e->pflags = 0;
 
-      /* Copy protocol specific embedded attributes. */
-      memcpy(&(e->u), &(new->u), sizeof(e->u));
-      e->pref = new->pref;
-      e->pflags = new->pflags;
+      rte e0 = {
+	.attrs = a,
+	.src = export->new.src,
+	.net = net,
+	.sender = dst,
+	.generation = export->new.generation + 1,
+      };
 
-#ifdef CONFIG_BGP
-      /* Hack to cleanup cached value */
-      if (e->attrs->src->proto->proto == &proto_bgp)
-	e->u.bgp.stale = -1;
-#endif
-
-      src = a->src;
+      rte_update(&e0);
     }
   else
-    {
-      e = NULL;
-      src = old->attrs->src;
-    }
-
-  src_ch->table->pipe_busy = 1;
-  rte_update2(dst, n->n.addr, e, src);
-  src_ch->table->pipe_busy = 0;
+    rte_withdraw(dst, net, export->old.src);
 }
 
 static int
-pipe_preexport(struct proto *P, rte **ee, struct linpool *p UNUSED)
+pipe_preexport(struct channel *src_ch, rte *e)
 {
-  struct proto *pp = (*ee)->sender->proto;
+  struct pipe_proto *p = (void *) src_ch->proto;
 
-  if (pp == P)
-    return -1;	/* Avoid local loops automatically */
+  /* Avoid direct loopbacks */
+  if (e->sender == src_ch)
+    return -1;
+
+  /* Indirection check */
+  if (e->generation >= ((struct pipe_config *) p->p.cf)->max_generation)
+    return -1;
 
   return 0;
 }
@@ -114,9 +103,34 @@ pipe_reload_routes(struct channel *C)
   struct pipe_proto *p = (void *) C->proto;
 
   /* Route reload on one channel is just refeed on the other */
-  channel_request_feeding((C == p->pri) ? p->sec : p->pri);
+  channel_request_feeding((C == p->pri) ? p->sec : p->pri, NULL);
 }
 
+static void
+pipe_rte_track(struct channel *C, net_addr *n, struct rte_src *src)
+{
+  struct pipe_proto *p = (void *) C->proto;
+  struct channel *src_ch = (C == p->pri) ? p->sec : p->pri;
+
+  net *nn = net_find(src_ch->table, n);
+  struct rte_storage *e = nn ? *rte_find(nn, src) : NULL;
+
+  log(L_TRACE "[route trace] Piped by protocol %s from table %s to table %s: %N %s/%u:%u",
+      p->p.name, src_ch->table->name, C->table->name, n, src->proto->name, src->private_id, src->global_id);
+
+  if (!e)
+  {
+    log(L_ERR "[route trace] Couldn't find parent route in table %s: %N %s/%u:%u", src_ch->table->name,
+	n, src->proto->name, src->private_id, src->global_id);
+    return;
+  }
+  else if (!e->generation)
+    log(L_TRACE "[route trace] Authored by channel %s.%s in table %s: %N %s/%u:%u",
+	e->sender->proto->name, e->sender->name, src_ch->table->name,
+	n, src->proto->name, src->private_id, src->global_id);
+  else
+    return e->sender->proto->rte_track(e->sender, n, src);
+}
 
 static void
 pipe_postconfig(struct cf_context *ctx, struct proto_config *CF)
@@ -154,7 +168,7 @@ pipe_configure_channels(struct pipe_proto *p, struct pipe_config *cf)
     .table = cc->table,
     .out_filter = cc->out_filter,
     .in_limit = cc->in_limit,
-    .ra_mode = RA_ANY
+    .ra_mode = RA_ANY,
   };
 
   struct channel_config sec_cf = {
@@ -163,7 +177,7 @@ pipe_configure_channels(struct pipe_proto *p, struct pipe_config *cf)
     .table = cf->peer,
     .out_filter = cc->in_filter,
     .in_limit = cc->out_limit,
-    .ra_mode = RA_ANY
+    .ra_mode = RA_ANY,
   };
 
   return
@@ -181,6 +195,7 @@ pipe_init(struct proto_config *CF)
   P->rt_notify = pipe_rt_notify;
   P->preexport = pipe_preexport;
   P->reload_routes = pipe_reload_routes;
+  P->rte_track = pipe_rte_track;
 
   pipe_configure_channels(p, cf);
 

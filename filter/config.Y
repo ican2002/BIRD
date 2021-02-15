@@ -249,10 +249,6 @@ assert_assign(struct cf_context *ctx, struct f_lval *lval, struct f_inst *expr, 
       setter = f_new_inst(ctx, FI_VAR_SET, expr, lval->sym);
       getter = f_new_inst(ctx, FI_VAR_GET, lval->sym);
       break;
-    case F_LVAL_PREFERENCE:
-      setter = f_new_inst(ctx, FI_PREF_SET, expr);
-      getter = f_new_inst(ctx, FI_PREF_GET);
-      break;
     case F_LVAL_SA:
       setter = f_new_inst(ctx, FI_RTA_SET, expr, lval->sa);
       getter = f_new_inst(ctx, FI_RTA_GET, lval->sa);
@@ -736,6 +732,7 @@ static_attr:
  | DEST    { $$ = f_new_static_attr(T_ENUM_RTD,   SA_DEST,	0); }
  | IFNAME  { $$ = f_new_static_attr(T_STRING,     SA_IFNAME,	0); }
  | IFINDEX { $$ = f_new_static_attr(T_INT,        SA_IFINDEX,	1); }
+ | PREFERENCE { $$ = f_new_static_attr(T_INT,	  SA_PREF,	0); }
  | WEIGHT  { $$ = f_new_static_attr(T_INT,        SA_WEIGHT,	0); }
  ;
 
@@ -761,8 +758,6 @@ term:
  | symbol_value   { $$ = $1; }
  | constant { $$ = $1; }
  | constructor { $$ = $1; }
-
- | PREFERENCE { $$ = f_new_inst(ctx, FI_PREF_GET); }
 
  | static_attr { $$ = f_new_inst(ctx, FI_RTA_GET, $1); }
 
@@ -856,9 +851,6 @@ cmd:
        cf_error("This static attribute is read-only.");
      $$ = f_new_inst(ctx, FI_RTA_SET, $3, $1);
    }
- | PREFERENCE '=' term ';' {
-     $$ = f_new_inst(ctx, FI_PREF_SET, $3);
-   }
  | UNSET '(' dynamic_attr ')' ';' {
      $$ = f_new_inst(ctx, FI_EA_UNSET, $3);
    }
@@ -901,7 +893,6 @@ get_cf_position:
 
 lvalue:
    CF_SYM_KNOWN { cf_assert_symbol(ctx, $1, SYM_VARIABLE); $$ = (struct f_lval) { .type = F_LVAL_VARIABLE, .sym = $1 }; }
- | PREFERENCE { $$ = (struct f_lval) { .type = F_LVAL_PREFERENCE }; }
  | static_attr { $$ = (struct f_lval) { .type = F_LVAL_SA, .sa = $1 }; }
  | dynamic_attr { $$ = (struct f_lval) { .type = F_LVAL_EA, .da = $1 }; };
 

@@ -143,10 +143,10 @@ perf_loop(void *data)
 
     if (!p->attrs_per_rte || !(i % p->attrs_per_rte)) {
       struct rta a0 = {
-	.src = p->p.main_source,
 	.source = RTS_PERF,
 	.scope = SCOPE_UNIVERSE,
 	.dest = RTD_UNICAST,
+	.pref = p->p.main_channel->preference,
 	.nh.iface = p->ifa->iface,
 	.nh.gw = gw,
 	.nh.weight = 1,
@@ -160,20 +160,27 @@ perf_loop(void *data)
 
   clock_gettime(CLOCK_MONOTONIC, &ts_generated);
 
-  for (uint i=0; i<N; i++) {
-    rte *e = rte_get_temp(p->data[i].a);
-    e->pflags = 0;
-
-    rte_update(P, &(p->data[i].net), e);
+  for (uint i=0; i<N; i++)
+  {
+    rte e0 = {
+      .attrs = p->data[i].a,
+      .src = p->p.main_source,
+      .net = &(p->data[i].net),
+      .sender = P->main_channel,
+    };
+    rte_update(&e0);
   }
 
   clock_gettime(CLOCK_MONOTONIC, &ts_update);
 
   if (!p->keep)
     for (uint i=0; i<N; i++)
-      rte_update(P, &(p->data[i].net), NULL);
+      rte_withdraw(P->main_channel, &(p->data[i].net), p->p.main_source);
 
   clock_gettime(CLOCK_MONOTONIC, &ts_withdraw);
+
+  for (uint i=0; i<N; i++)
+    rta_free(p->data[i].a);
 
   s64 gentime = timediff(&ts_begin, &ts_generated);
   s64 updatetime = timediff(&ts_generated, &ts_update);
@@ -204,9 +211,9 @@ perf_loop(void *data)
 }
 
 static void
-perf_rt_notify(struct proto *P, struct channel *c UNUSED, struct network *net UNUSED, struct rte *new UNUSED, struct rte *old UNUSED)
+perf_rt_notify(struct channel *c, struct rte_export *e UNUSED)
 {
-  struct perf_proto *p = (struct perf_proto *) P;
+  struct perf_proto *p = (struct perf_proto *) c->proto;
   p->exp++;
   return;
 }
@@ -238,7 +245,7 @@ perf_feed_end(struct channel *c)
   p->feed_begin = NULL;
 
   if (p->run < p->repeat)
-    channel_request_feeding(c);
+    channel_request_feeding(c, NULL);
   else
     PLOG("feed done");
 }

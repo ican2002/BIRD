@@ -66,34 +66,30 @@ dev_ifa_notify(struct proto *P, uint flags, struct ifa *ad)
       DBG("dev_if_notify: %s:%I going down\n", ad->iface->name, ad->ip);
 
       /* Use iface ID as local source ID */
-      struct rte_src *src = rt_get_source(P, ad->iface->index);
-      rte_update2(c, net, NULL, src);
+      rte_withdraw(c, net, rt_get_source(P, ad->iface->index));
     }
   else if (flags & IF_CHANGE_UP)
     {
-      rta *a;
-      rte *e;
-
       DBG("dev_if_notify: %s:%I going up\n", ad->iface->name, ad->ip);
 
       if (cf->check_link && !(ad->iface->flags & IF_LINK_UP))
 	return;
 
-      /* Use iface ID as local source ID */
-      struct rte_src *src = rt_get_source(P, ad->iface->index);
-
       rta a0 = {
-	.src = src,
+	/* Use iface ID as local source ID */
+	.pref = c->preference,
 	.source = RTS_DEVICE,
 	.scope = SCOPE_UNIVERSE,
 	.dest = RTD_UNICAST,
 	.nh.iface = ad->iface,
       };
-
-      a = rta_lookup(&a0);
-      e = rte_get_temp(a);
-      e->pflags = 0;
-      rte_update2(c, net, e, src);
+      rte e0 = {
+	.src = rt_get_source(P, ad->iface->index),
+	.net = net,
+	.attrs = &a0,
+	.sender = c,
+      };
+      rte_update(&e0);
     }
 }
 

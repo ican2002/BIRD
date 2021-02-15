@@ -76,16 +76,6 @@ void dump(struct proto *p)
 { DUMMY; }
 
 /**
- * dump_attrs - dump protocol-dependent attributes
- * @e: a route entry
- *
- * This hook dumps all attributes in the &rte which belong to this
- * protocol to the debug output.
- */
-void dump_attrs(rte *e)
-{ DUMMY; }
-
-/**
  * start - request instance startup
  * @p: protocol instance
  *
@@ -228,36 +218,6 @@ void neigh_notify(neighbor *neigh)
 { DUMMY; }
 
 /**
- * make_tmp_attrs - convert embedded attributes to temporary ones
- * @e: route entry
- * @pool: linear pool to allocate attribute memory in
- *
- * This hook is called by the routing table functions if they need
- * to convert the protocol attributes embedded directly in the &rte
- * to temporary extended attributes in order to distribute them
- * to other protocols or to filters. make_tmp_attrs() creates
- * an &ea_list in the linear pool @pool, fills it with values of the
- * temporary attributes and returns a pointer to it.
- */
-ea_list *make_tmp_attrs(rte *e, struct linpool *pool)
-{ DUMMY; }
-
-/**
- * store_tmp_attrs - convert temporary attributes to embedded ones
- * @e: route entry
- * @attrs: temporary attributes to be converted
- *
- * This hook is an exact opposite of make_tmp_attrs() -- it takes
- * a list of extended attributes and converts them to attributes
- * embedded in the &rte corresponding to this protocol.
- *
- * You must be prepared for any of the attributes being missing
- * from the list and use default values instead.
- */
-void store_tmp_attrs(rte *e, ea_list *attrs)
-{ DUMMY; }
-
-/**
  * preexport - pre-filtering decisions before route export
  * @p: protocol instance the route is going to be exported to
  * @e: the route in question
@@ -312,21 +272,6 @@ int rte_recalculate(struct rtable *table, struct network *net, struct rte *new, 
  * Result: 1 if @new is better (more preferred) than @old, 0 otherwise.
  */
 int rte_better(rte *new, rte *old)
-{ DUMMY; }
-
-/**
- * rte_same - compare two routes
- * @e1: route
- * @e2: route
- *
- * The rte_same() hook tests whether the routes @e1 and @e2 belonging
- * to the same protocol instance have identical contents. Contents of
- * &rta, all the extended attributes and &rte preference are checked
- * by the core code, no need to take care of them here.
- *
- * Result: 1 if @e1 is identical to @e2, 0 otherwise.
- */
-int rte_same(rte *e1, rte *e2)
 { DUMMY; }
 
 /**

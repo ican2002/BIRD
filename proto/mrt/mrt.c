@@ -457,21 +457,21 @@ mrt_rib_table_entry_bgp_attrs(struct mrt_table_dump_state *s, rte *r)
   return;
 
 fail:
-  mrt_log(s, "Attribute list too long for %N", r->net->n.addr);
+  mrt_log(s, "Attribute list too long for %N", r->net);
 }
 #endif
 
 static void
-mrt_rib_table_entry(struct mrt_table_dump_state *s, rte *r)
+mrt_rib_table_entry(struct mrt_table_dump_state *s, rte *r, struct rte_storage *er)
 {
   buffer *b = &s->buf;
   uint peer = 0;
 
 #ifdef CONFIG_BGP
   /* Find peer index */
-  if (r->attrs->src->proto->proto == &proto_bgp)
+  if (r->src->proto->proto == &proto_bgp)
   {
-    struct bgp_proto *p = (void *) r->attrs->src->proto;
+    struct bgp_proto *p = (void *) r->src->proto;
     struct mrt_peer_entry *n =
       HASH_FIND(s->peer_hash, PEER, p->remote_id, p->remote_as, p->remote_ip);
 
@@ -481,11 +481,11 @@ mrt_rib_table_entry(struct mrt_table_dump_state *s, rte *r)
 
   /* Peer Index and Originated Time */
   mrt_put_u16(b, peer);
-  mrt_put_u32(b, (r->lastmod + s->time_offset) TO_S);
+  mrt_put_u32(b, (er->lastmod + s->time_offset) TO_S);
 
   /* Path Identifier */
   if (s->add_path)
-    mrt_put_u32(b, r->attrs->src->private_id);
+    mrt_put_u32(b, r->src->private_id);
 
   /* Route Attributes */
   mrt_put_u16(b, 0);
@@ -509,26 +509,22 @@ mrt_rib_table_dump(struct mrt_table_dump_state *s, net *n, int add_path)
   mrt_init_message(&s->buf, MRT_TABLE_DUMP_V2, subtype);
   mrt_rib_table_header(s, n->n.addr);
 
-  rte *rt, *rt0;
-  for (rt0 = n->routes; rt = rt0; rt0 = rt0->next)
+  for (struct rte_storage *rt = n->routes; rt; rt = rt->next)
   {
     if (rte_is_filtered(rt))
       continue;
 
     /* Skip routes that should be reported in the other phase */
-    if (!s->always_add_path && (!rt->attrs->src->private_id != !s->add_path))
+    if (!s->always_add_path && (!rt->src->private_id != !s->add_path))
     {
       s->want_add_path = 1;
       continue;
     }
 
-    rte_make_tmp_attrs(&rt, s->linpool, NULL);
+    rte e = rte_copy(rt);
 
-    if (f_run(s->filter, &rt, s->linpool, 0) <= F_ACCEPT)
-      mrt_rib_table_entry(s, rt);
-
-    if (rt != rt0)
-      rte_free(rt);
+    if (f_run(s->filter, &e, s->linpool, 0) <= F_ACCEPT)
+      mrt_rib_table_entry(s, &e, rt);
 
     lp_flush(s->linpool);
   }

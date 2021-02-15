@@ -180,6 +180,8 @@ proto_add_channel(struct proto *p, struct channel_config *cf)
   c->last_state_change = current_time();
   c->reloadable = 1;
 
+  init_list(&c->net_feed);
+
   CALL(c->channel->init, c, cf);
 
   add_tail(&p->channels, &c->n);
@@ -291,6 +293,27 @@ channel_feed_loop(void *ptr)
     c->proto->feed_end(c);
 }
 
+static void
+channel_feed_net(void *data)
+{
+  struct channel_net_feed *nf = data;
+
+  rt_feed_channel_net(nf->c, nf->addr);
+  rem_node(&nf->n);
+  mb_free(nf);
+}
+
+static void
+channel_schedule_feed_net(struct channel *c, net_addr *n)
+{
+  struct channel_net_feed *nf = mb_alloc(c->proto->pool, sizeof(struct channel_net_feed) + n->length);
+  nf->n = (node) {};
+  nf->e = (event) { .hook = channel_feed_net, .data = nf };
+  nf->c = c;
+  net_copy(nf->addr, n);
+  add_tail(&c->net_feed, &nf->n);
+  ev_schedule(&nf->e);
+}
 
 static void
 channel_start_export(struct channel *c)
@@ -308,9 +331,20 @@ channel_stop_export(struct channel *c)
   if (c->export_state == ES_FEEDING)
     rt_feed_channel_abort(c);
 
+  /* Abort also all scheduled net feeds */
+  struct channel_net_feed *n;
+  node *nxt;
+  WALK_LIST_DELSAFE(n, nxt, c->net_feed)
+  {
+    ev_postpone(&n->e);
+    rem_node(&n->n);
+    mb_free(n);
+  }
+
   c->export_state = ES_DOWN;
   c->stats.exp_routes = 0;
   bmap_reset(&c->export_map, 1024);
+  bmap_reset(&c->export_reject_map, 1024);
 }
 
 
@@ -390,6 +424,7 @@ channel_do_start(struct channel *c)
   c->feed_event = ev_new_init(c->proto->pool, channel_feed_loop, c);
 
   bmap_init(&c->export_map, c->proto->pool, 1024);
+  bmap_init(&c->export_reject_map, c->proto->pool, 1024);
   memset(&c->stats, 0, sizeof(struct proto_stats));
 
   channel_reset_limit(&c->rx_limit);
@@ -412,6 +447,7 @@ channel_do_flush(struct channel *c)
 
   /* This have to be done in here, as channel pool is freed before channel_do_down() */
   bmap_free(&c->export_map);
+  bmap_free(&c->export_reject_map);
   c->in_table = NULL;
   c->reload_event = NULL;
   c->out_table = NULL;
@@ -525,7 +561,7 @@ channel_set_state(struct channel *c, uint state)
  * even when feeding is already running, in that case it is restarted.
  */
 void
-channel_request_feeding(struct channel *c)
+channel_request_feeding(struct channel *c, net_addr *n)
 {
   ASSERT(c->channel_state == CS_UP);
 
@@ -542,8 +578,16 @@ channel_request_feeding(struct channel *c)
     if (!c->feed_active)
 	return;
 
+    /* Unless only single net is requested */
+    if (n)
+      return channel_schedule_feed_net(c, n);
+
     rt_feed_channel_abort(c);
   }
+
+  /* Single net refeed isn't counted */
+  if (n)
+    return channel_schedule_feed_net(c, n);
 
   /* Track number of exported routes during refeed */
   c->refeed_count = 0;
@@ -679,8 +723,8 @@ channel_reconfigure(struct channel *c, struct channel_config *cf)
   c->out_limit = cf->out_limit;
 
   // c->ra_mode = cf->ra_mode;
-  c->merge_limit = cf->merge_limit;
   c->preference = cf->preference;
+  c->merge_limit = cf->merge_limit;
   c->debug = cf->debug;
   c->in_keep_filtered = cf->in_keep_filtered;
 
@@ -716,7 +760,7 @@ channel_reconfigure(struct channel *c, struct channel_config *cf)
     channel_request_reload(c);
 
   if (export_changed)
-    channel_request_feeding(c);
+    channel_request_feeding(c, NULL);
 
 done:
   CD(c, "Reconfigured");
@@ -2025,7 +2069,7 @@ proto_cmd_reload(struct proto *p, uintptr_t dir, int cnt UNUSED)
   if (dir != CMD_RELOAD_IN)
     WALK_LIST(c, p->channels)
       if (c->channel_state == CS_UP)
-	channel_request_feeding(c);
+	channel_request_feeding(c, NULL);
 
   cli_msg(-15, "%s: reloading", p->name);
 }
