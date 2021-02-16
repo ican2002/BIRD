@@ -1340,36 +1340,30 @@ bgp_rte_update(struct bgp_parse_state *s, net_addr *n, u32 path_id, rta *a0)
   {
     s->last_src = rt_get_source(&s->proto->p, path_id);
     s->last_id = path_id;
-
-    rta_free(s->cached_rta);
-    s->cached_rta = NULL;
   }
 
   if (!a0)
   {
     /* Route withdraw */
-    rte_update3(&s->channel->c, n, NULL, s->last_src);
+    rte_withdraw(&(s->channel->c), n, s->last_src);
     return;
   }
 
   /* Prepare cached route attributes */
   if (s->cached_rta == NULL)
   {
-    a0->src = s->last_src;
-
     /* Workaround for rta_lookup() breaking eattrs */
     ea_list *ea = a0->eattrs;
     s->cached_rta = rta_lookup(a0);
     a0->eattrs = ea;
   }
 
-  rta *a = rta_clone(s->cached_rta);
-  rte *e = rte_get_temp(a);
+  rte e0 = {
+    .attrs = rta_clone(s->cached_rta),
+    .src = s->last_src,
+  };
 
-  e->pflags = 0;
-  e->u.bgp.suppressed = 0;
-  e->u.bgp.stale = -1;
-  rte_update3(&s->channel->c, n, e, s->last_src);
+  rte_update(&(s->channel->c), n, &e0);
 }
 
 static void
@@ -2439,6 +2433,7 @@ bgp_decode_nlri(struct bgp_parse_state *s, u32 afi, byte *nlri, uint len, ea_lis
     a->scope = SCOPE_UNIVERSE;
     a->from = s->proto->remote_ip;
     a->eattrs = ea;
+    a->pref = c->c.preference;
 
     c->desc->decode_next_hop(s, nh, nh_len, a);
     bgp_finish_attrs(s, a);
@@ -2696,7 +2691,7 @@ bgp_rx_route_refresh(struct bgp_conn *conn, byte *pkt, uint len)
   {
   case BGP_RR_REQUEST:
     BGP_TRACE(D_PACKETS, "Got ROUTE-REFRESH");
-    channel_request_feeding(&c->c);
+    channel_request_feeding(&c->c, NULL);
     break;
 
   case BGP_RR_BEGIN:

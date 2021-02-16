@@ -41,66 +41,57 @@
 #include "filter/filter.h"
 #include "lib/string.h"
 
+#ifdef CONFIG_BGP
+#include "proto/bgp/bgp.h"
+#endif
+
 #include "pipe.h"
 
 static void
-pipe_rt_notify(struct proto *P, struct channel *src_ch, net *n, rte *new, rte *old)
+pipe_rt_notify(struct channel *src_ch, struct rte_export *export)
 {
-  struct pipe_proto *p = (void *) P;
+  struct pipe_proto *p = (void *) src_ch->proto;
   struct channel *dst = (src_ch == p->pri) ? p->sec : p->pri;
-  struct rte_src *src;
 
-  rte *e;
-  rta *a;
-
-  if (!new && !old)
+  if (!export->new && !export->old)
     return;
 
   if (dst->table->pipe_busy)
     {
       log(L_ERR "Pipe loop detected when sending %N to table %s",
-	  n->n.addr, dst->table->name);
+	  export->net, dst->table->name);
       return;
     }
 
-  if (new)
+  if (export->new)
     {
-      a = alloca(rta_size(new->attrs));
-      memcpy(a, new->attrs, rta_size(new->attrs));
+      rta *a = alloca(rta_size(export->new->attrs));
+      memcpy(a, export->new->attrs, rta_size(export->new->attrs));
 
-      a->aflags = 0;
+      a->cached = 0;
+      a->uc = 0;
       a->hostentry = NULL;
-      e = rte_get_temp(a);
-      e->pflags = 0;
 
-      /* Copy protocol specific embedded attributes. */
-      memcpy(&(e->u), &(new->u), sizeof(e->u));
-      e->pref = new->pref;
-      e->pflags = new->pflags;
+      rte e0 = {
+	.attrs = rta_lookup(a),
+      };
 
-#ifdef CONFIG_BGP
-      /* Hack to cleanup cached value */
-      if (e->attrs->src->proto->proto == &proto_bgp)
-	e->u.bgp.stale = -1;
-#endif
-
-      src = a->src;
+      src_ch->table->pipe_busy = 1;
+      rte_update(dst, export->net, &e0);
+      src_ch->table->pipe_busy = 0;
     }
   else
     {
-      e = NULL;
-      src = old->attrs->src;
+      src_ch->table->pipe_busy = 1;
+      rte_withdraw(dst, export->net, export->old_src);
+      src_ch->table->pipe_busy = 0;
     }
-
-  src_ch->table->pipe_busy = 1;
-  rte_update2(dst, n->n.addr, e, src);
-  src_ch->table->pipe_busy = 0;
 }
 
 static int
-pipe_preexport(struct proto *P, rte **ee, struct linpool *p UNUSED)
+pipe_preexport(struct proto *P, rte *e)
 {
-  struct proto *pp = (*ee)->sender->proto;
+  struct proto *pp = e->sender->proto;
 
   if (pp == P)
     return -1;	/* Avoid local loops automatically */
@@ -114,7 +105,7 @@ pipe_reload_routes(struct channel *C)
   struct pipe_proto *p = (void *) C->proto;
 
   /* Route reload on one channel is just refeed on the other */
-  channel_request_feeding((C == p->pri) ? p->sec : p->pri);
+  channel_request_feeding((C == p->pri) ? p->sec : p->pri, NULL);
 }
 
 

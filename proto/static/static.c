@@ -56,10 +56,10 @@ static void
 static_announce_rte(struct static_proto *p, struct static_route *r)
 {
   rta *a = allocz(RTA_MAX_SIZE);
-  a->src = static_get_source(p, r->index);
   a->source = RTS_STATIC;
   a->scope = SCOPE_UNIVERSE;
   a->dest = r->dest;
+  a->pref = p->p.main_channel->preference;
 
   if (r->dest == RTD_UNICAST)
   {
@@ -102,8 +102,10 @@ static_announce_rte(struct static_proto *p, struct static_route *r)
     return;
 
   /* We skip rta_lookup() here */
-  rte *e = rte_get_temp(a);
-  e->pflags = 0;
+  rte e0 = {
+    .attrs = a,
+    .src = static_get_source(p, r->index),
+  }, *e = &e0;
 
   if (r->cmds)
   {
@@ -114,12 +116,9 @@ static_announce_rte(struct static_proto *p, struct static_route *r)
 
     /* Evaluate the filter */
     f_eval_rte(r->cmds, &e, static_lp);
-
-    /* Remove the temporary node */
-    e->net = NULL;
   }
 
-  rte_update2(p->p.main_channel, r->net, e, a->src);
+  rte_update(p->p.main_channel, r->net, e);
   r->state = SRS_CLEAN;
 
   if (r->cmds)
@@ -131,7 +130,7 @@ withdraw:
   if (r->state == SRS_DOWN)
     return;
 
-  rte_update2(p->p.main_channel, r->net, NULL, a->src);
+  rte_withdraw(p->p.main_channel, r->net, static_get_source(p, r->index));
   r->state = SRS_DOWN;
 }
 
@@ -264,7 +263,7 @@ static void
 static_remove_rte(struct static_proto *p, struct static_route *r)
 {
   if (r->state)
-    rte_update2(p->p.main_channel, r->net, NULL, static_get_source(p, r->index));
+    rte_withdraw(p->p.main_channel, r->net, static_get_source(p, r->index));
 
   static_reset_rte(p, r);
 }
@@ -673,9 +672,9 @@ static_get_route_info(rte *rte, byte *buf)
 {
   eattr *a = ea_find(rte->attrs->eattrs, EA_GEN_IGP_METRIC);
   if (a)
-    buf += bsprintf(buf, " (%d/%u)", rte->pref, a->u.data);
+    buf += bsprintf(buf, " (%d/%u)", rte->attrs->pref, a->u.data);
   else
-    buf += bsprintf(buf, " (%d)", rte->pref);
+    buf += bsprintf(buf, " (%d)", rte->attrs->pref);
 }
 
 static void

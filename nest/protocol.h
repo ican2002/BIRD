@@ -74,7 +74,6 @@ struct protocol {
   struct proto * (*init)(struct proto_config *);		/* Create new instance */
   int (*reconfigure)(struct proto *, struct proto_config *);	/* Try to reconfigure instance, returns success */
   void (*dump)(struct proto *);			/* Debugging dump */
-  void (*dump_attrs)(struct rte *);		/* Dump protocol-dependent attributes */
   int (*start)(struct proto *);			/* Start the instance */
   int (*shutdown)(struct proto *);		/* Stop the instance */
   void (*cleanup)(struct proto *);		/* Called after shutdown when protocol became hungry/down */
@@ -198,12 +197,11 @@ struct proto {
    *	   ifa_notify	Notify protocol about interface address changes.
    *	   rt_notify	Notify protocol about routing table updates.
    *	   neigh_notify	Notify protocol about neighbor cache events.
-   *	   make_tmp_attrs  Add attributes to rta from from private attrs stored in rte. The route and rta MUST NOT be cached.
-   *	   store_tmp_attrs Store private attrs back to rte and undef added attributes. The route and rta MUST NOT be cached.
-   *	   preexport  Called as the first step of the route exporting process.
-   *			It can construct a new rte, add private attributes and
-   *			decide whether the route shall be exported: 1=yes, -1=no,
-   *			0=process it through the export filter set by the user.
+   *	   preexport	Called as the first step of the route exporting process.
+   *			It can decide whether the route shall be exported:
+   *			  -1 = reject,
+   *			   0 = continue to export filter
+   *			   1 = accept immediately
    *	   reload_routes   Request channel to reload all its routes to the core
    *			(using rte_update()). Returns: 0=reload cannot be done,
    *			1= reload is scheduled and will happen (asynchronously).
@@ -213,11 +211,9 @@ struct proto {
 
   void (*if_notify)(struct proto *, unsigned flags, struct iface *i);
   void (*ifa_notify)(struct proto *, unsigned flags, struct ifa *a);
-  void (*rt_notify)(struct proto *, struct channel *, struct network *net, struct rte *new, struct rte *old);
+  void (*rt_notify)(struct channel *, struct rte_export *);
   void (*neigh_notify)(struct neighbor *neigh);
-  void (*make_tmp_attrs)(struct rte *rt, struct linpool *pool);
-  void (*store_tmp_attrs)(struct rte *rt, struct linpool *pool);
-  int (*preexport)(struct proto *, struct rte **rt, struct linpool *pool);
+  int (*preexport)(struct proto *, struct rte *rt);
   void (*reload_routes)(struct channel *);
   void (*feed_begin)(struct channel *, int initial);
   void (*feed_end)(struct channel *);
@@ -227,7 +223,6 @@ struct proto {
    *
    *	   rte_recalculate Called at the beginning of the best route selection
    *	   rte_better	Compare two rte's and decide which one is better (1=first, 0=second).
-   *       rte_same	Compare two rte's and decide whether they are identical (1=yes, 0=no).
    *       rte_mergable	Compare two rte's and decide whether they could be merged (1=yes, 0=no).
    *	   rte_insert	Called whenever a rte is inserted to a routing table.
    *	   rte_remove	Called whenever a rte is removed from the routing table.
@@ -235,7 +230,6 @@ struct proto {
 
   int (*rte_recalculate)(struct rtable *, struct network *, struct rte *, struct rte *, struct rte *);
   int (*rte_better)(struct rte *, struct rte *);
-  int (*rte_same)(struct rte *, struct rte *);
   int (*rte_mergable)(struct rte *, struct rte *);
   struct rte * (*rte_modify)(struct rte *, struct linpool *);
   void (*rte_insert)(struct network *, struct rte *);
@@ -469,7 +463,6 @@ struct channel_class {
 
 
   void (*dump)(struct proto *);			/* Debugging dump */
-  void (*dump_attrs)(struct rte *);		/* Dump protocol-dependent attributes */
 
   void (*get_status)(struct proto *, byte *buf); /* Get instance status (for `show protocols' command) */
   void (*get_route_info)(struct rte *, byte *buf); /* Get route information (for `show route' command) */
@@ -479,7 +472,7 @@ struct channel_class {
 #endif
 };
 
-extern struct channel_class channel_bgp;
+extern struct channel_class channel_bgp, channel_krt;
 
 struct channel_config {
   node n;
@@ -514,7 +507,8 @@ struct channel {
   struct rtable *table;
   const struct filter *in_filter;	/* Input filter */
   const struct filter *out_filter;	/* Output filter */
-  struct bmap export_map;		/* Keeps track which routes passed export filter */
+  struct bmap export_map;		/* Keeps track which routes were really exported */
+  struct bmap export_reject_map;	/* Keeps track which routes were rejected by export filter */
   struct channel_limit rx_limit;	/* Receive limit (for in_keep_filtered) */
   struct channel_limit in_limit;	/* Input limit */
   struct channel_limit out_limit;	/* Output limit */
@@ -549,14 +543,22 @@ struct channel {
   struct fib_iterator reload_fit;	/* FIB iterator in in_table used during reloading */
   struct rte *reload_next_rte;		/* Route iterator in in_table used during reloading */
   u8 reload_active;			/* Iterator reload_fit is linked */
-
   u8 reload_pending;			/* Reloading and another reload is scheduled */
   u8 refeed_pending;			/* Refeeding and another refeed is scheduled */
   u8 rpki_reload;			/* RPKI changes trigger channel reload */
 
+  list net_feed;			/* Active net feeders (struct channel_net_feed) */
+
   struct rtable *out_table;		/* Internal table for exported routes */
 
   list roa_subscriptions;		/* List of active ROA table subscriptions based on filters roa_check() */
+};
+
+struct channel_net_feed {
+  node n;
+  struct event e;
+  struct channel *c;
+  net_addr addr[0];
 };
 
 
@@ -632,23 +634,9 @@ static inline void channel_init(struct channel *c) { channel_set_state(c, CS_STA
 static inline void channel_open(struct channel *c) { channel_set_state(c, CS_UP); }
 static inline void channel_close(struct channel *c) { channel_set_state(c, CS_FLUSHING); }
 
-void channel_request_feeding(struct channel *c);
+void channel_request_feeding(struct channel *c, net_addr *n);
 void *channel_config_new(const struct channel_class *cc, const char *name, uint net_type, struct proto_config *proto);
 void *channel_config_get(const struct channel_class *cc, const char *name, uint net_type, struct proto_config *proto);
 int channel_reconfigure(struct channel *c, struct channel_config *cf);
-
-
-/* Moved from route.h to avoid dependency conflicts */
-static inline void rte_update(struct proto *p, const net_addr *n, rte *new) { rte_update2(p->main_channel, n, new, p->main_source); }
-
-static inline void
-rte_update3(struct channel *c, const net_addr *n, rte *new, struct rte_src *src)
-{
-  if (c->in_table && !rte_update_in(c, n, new, src))
-    return;
-
-  rte_update2(c, n, new, src);
-}
-
 
 #endif

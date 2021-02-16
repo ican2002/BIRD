@@ -347,7 +347,7 @@ krt_send_route(struct krt_proto *p, int cmd, rte *e)
 }
 
 void
-krt_replace_rte(struct krt_proto *p, net *n, rte *new, rte *old)
+krt_replace_rte(struct krt_proto *p, rte *new, rte *old)
 {
   int err = 0;
 
@@ -374,7 +374,6 @@ krt_read_route(struct ks_msg *msg, struct krt_proto *p, int scan)
   /* p is NULL iff KRT_SHARED_SOCKET and !scan */
 
   int ipv6;
-  rte *e;
   net *net;
   sockaddr dst, gate, mask;
   ip_addr idst, igate, imask;
@@ -495,7 +494,6 @@ krt_read_route(struct ks_msg *msg, struct krt_proto *p, int scan)
   net = net_get(p->p.main_channel->table, &ndst);
 
   rta a = {
-    .src = p->p.main_source,
     .source = RTS_INHERIT,
     .scope = SCOPE_UNIVERSE,
   };
@@ -549,19 +547,25 @@ krt_read_route(struct ks_msg *msg, struct krt_proto *p, int scan)
       }
   }
 
- done:
-  e = rte_get_temp(&a);
+ done:;
+  rte e0 = {}, *e = &e0;
+  e->attrs = &a;
   e->net = net;
-  e->u.krt.src = src;
-  e->u.krt.proto = src2;
-  e->u.krt.seen = 0;
-  e->u.krt.best = 0;
-  e->u.krt.metric = 0;
+
+  ea_list *ea = alloca(sizeof(ea_list) + 1 * sizeof(eattr));
+  *ea = (ea_list) { .count = 1, .next = e->attrs->eattrs };
+  e->attrs->eattrs = ea;
+
+  ea->attrs[0] = (eattr) {
+    .id = EA_KRT_SOURCE,
+    .type = EAF_TYPE_INT,
+    .u.data = src2,
+  };
 
   if (scan)
-    krt_got_route(p, e);
+    krt_got_route(p, e, src);
   else
-    krt_got_route_async(p, e, new);
+    krt_got_route_async(p, e, new, src);
 }
 
 static void

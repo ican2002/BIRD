@@ -1305,8 +1305,6 @@ nl_send_route(struct krt_proto *p, rte *e, int op, int dest, struct nexthop *nh)
 
   if (p->af == AF_MPLS)
     priority = 0;
-  else if (a->source == RTS_DUMMY)
-    priority = e->u.krt.metric;
   else if (KRT_CF->sys.metric)
     priority = KRT_CF->sys.metric;
   else if ((op != NL_OP_DELETE) && (ea = ea_find(eattrs, EA_KRT_METRIC)))
@@ -1429,7 +1427,7 @@ nl_replace_rte(struct krt_proto *p, rte *e)
 
 
 void
-krt_replace_rte(struct krt_proto *p, net *n UNUSED, rte *new, rte *old)
+krt_replace_rte(struct krt_proto *p, rte *new, rte *old)
 {
   int err = 0;
 
@@ -1488,18 +1486,29 @@ nl_mergable_route(struct nl_parse_state *s, net *net, struct krt_proto *p, uint 
 static void
 nl_announce_route(struct nl_parse_state *s)
 {
-  rte *e = rte_get_temp(s->attrs);
+  rte e0 = {}, *e = &e0;
+  e->attrs = s->attrs;
   e->net = s->net;
-  e->u.krt.src = s->krt_src;
-  e->u.krt.proto = s->krt_proto;
-  e->u.krt.seen = 0;
-  e->u.krt.best = 0;
-  e->u.krt.metric = s->krt_metric;
+
+  ea_list *ea = alloca(sizeof(ea_list) + 2 * sizeof(eattr));
+  *ea = (ea_list) { .count = 2, .next = e->attrs->eattrs };
+  e->attrs->eattrs = ea;
+
+  ea->attrs[0] = (eattr) {
+    .id = EA_KRT_SOURCE,
+    .type = EAF_TYPE_INT,
+    .u.data = s->krt_proto,
+  };
+  ea->attrs[1] = (eattr) {
+    .id = EA_KRT_METRIC,
+    .type = EAF_TYPE_INT,
+    .u.data = s->krt_metric,
+  };
 
   if (s->scan)
-    krt_got_route(s->proto, e);
+    krt_got_route(s->proto, e, s->krt_src);
   else
-    krt_got_route_async(s->proto, e, s->new);
+    krt_got_route_async(s->proto, e, s->new, s->krt_src);
 
   s->net = NULL;
   s->attrs = NULL;
@@ -1659,7 +1668,6 @@ nl_parse_route(struct nl_parse_state *s, struct nlmsghdr *h)
     nl_announce_route(s);
 
   rta *ra = lp_allocz(s->pool, RTA_MAX_SIZE);
-  ra->src = p->p.main_source;
   ra->source = RTS_INHERIT;
   ra->scope = SCOPE_UNIVERSE;
 

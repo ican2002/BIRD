@@ -1661,10 +1661,9 @@ bgp_free_prefix(struct bgp_channel *c, struct bgp_prefix *px)
  */
 
 int
-bgp_preexport(struct proto *P, rte **new, struct linpool *pool UNUSED)
+bgp_preexport(struct proto *P, rte *e)
 {
-  rte *e = *new;
-  struct proto *SRC = e->attrs->src->proto;
+  struct proto *SRC = e->src->proto;
   struct bgp_proto *p = (struct bgp_proto *) P;
   struct bgp_proto *src = (SRC->proto == &proto_bgp) ? (struct bgp_proto *) SRC : NULL;
 
@@ -1719,7 +1718,7 @@ bgp_preexport(struct proto *P, rte **new, struct linpool *pool UNUSED)
 static ea_list *
 bgp_update_attrs(struct bgp_proto *p, struct bgp_channel *c, rte *e, ea_list *attrs0, struct linpool *pool)
 {
-  struct proto *SRC = e->attrs->src->proto;
+  struct proto *SRC = e->src->proto;
   struct bgp_proto *src = (SRC->proto == &proto_bgp) ? (void *) SRC : NULL;
   struct bgp_export_state s = { .proto = p, .channel = c, .pool = pool, .src = src, .route = e, .mpls = c->desc->mpls };
   ea_list *attrs = attrs0;
@@ -1833,31 +1832,31 @@ bgp_update_attrs(struct bgp_proto *p, struct bgp_channel *c, rte *e, ea_list *at
 }
 
 void
-bgp_rt_notify(struct proto *P, struct channel *C, net *n, rte *new, rte *old)
+bgp_rt_notify(struct channel *C, struct rte_export *e)
 {
-  struct bgp_proto *p = (void *) P;
+  struct bgp_proto *p = (void *) C->proto;
   struct bgp_channel *c = (void *) C;
   struct bgp_bucket *buck;
   struct bgp_prefix *px;
   u32 path;
 
-  if (new)
+  if (e->new)
   {
-    struct ea_list *attrs = bgp_update_attrs(p, c, new, new->attrs->eattrs, bgp_linpool2);
+    struct ea_list *attrs = bgp_update_attrs(p, c, e->new, e->new->attrs->eattrs, bgp_linpool2);
 
     /* If attributes are invalid, we fail back to withdraw */
     buck = attrs ? bgp_get_bucket(c, attrs) : bgp_get_withdraw_bucket(c);
-    path = new->attrs->src->global_id;
+    path = e->new_src->global_id;
 
     lp_flush(bgp_linpool2);
   }
   else
   {
     buck = bgp_get_withdraw_bucket(c);
-    path = old->attrs->src->global_id;
+    path = e->old_src->global_id;
   }
 
-  px = bgp_get_prefix(c, n->n.addr, c->add_path_tx ? path : 0);
+  px = bgp_get_prefix(c, e->net, c->add_path_tx ? path : 0);
   add_tail(&buck->prefixes, &px->buck_node);
 
   bgp_schedule_packet(p->conn, c, PKT_UPDATE);
@@ -1874,34 +1873,44 @@ bgp_get_neighbor(rte *r)
     return as;
 
   /* If AS_PATH is not defined, we treat rte as locally originated */
-  struct bgp_proto *p = (void *) r->attrs->src->proto;
+  struct bgp_proto *p = (void *) r->src->proto;
   return p->cf->confederation ?: p->local_as;
 }
 
 static inline int
 rte_stale(rte *r)
 {
-  if (r->u.bgp.stale < 0)
-  {
-    /* If staleness is unknown, compute and cache it */
-    eattr *a = ea_find(r->attrs->eattrs, EA_CODE(PROTOCOL_BGP, BA_COMMUNITY));
-    r->u.bgp.stale = a && int_set_contains(a->u.ptr, BGP_COMM_LLGR_STALE);
-  }
+  if (r->pflags & BGP_REF_STALE)
+    return 1;
 
-  return r->u.bgp.stale;
+  if (r->pflags & BGP_REF_NOT_STALE)
+    return 0;
+
+  /* If staleness is unknown, compute and cache it */
+  eattr *a = ea_find(r->attrs->eattrs, EA_CODE(PROTOCOL_BGP, BA_COMMUNITY));
+  if (a && int_set_contains(a->u.ptr, BGP_COMM_LLGR_STALE))
+  {
+    r->pflags |= BGP_REF_STALE;
+    return 1;
+  }
+  else
+  {
+    r->pflags |= BGP_REF_NOT_STALE;
+    return 0;
+  }
 }
 
 int
 bgp_rte_better(rte *new, rte *old)
 {
-  struct bgp_proto *new_bgp = (struct bgp_proto *) new->attrs->src->proto;
-  struct bgp_proto *old_bgp = (struct bgp_proto *) old->attrs->src->proto;
+  struct bgp_proto *new_bgp = (struct bgp_proto *) new->src->proto;
+  struct bgp_proto *old_bgp = (struct bgp_proto *) old->src->proto;
   eattr *x, *y;
   u32 n, o;
 
   /* Skip suppressed routes (see bgp_rte_recalculate()) */
-  n = new->u.bgp.suppressed;
-  o = old->u.bgp.suppressed;
+  n = new->pflags & BGP_REF_SUPPRESSED;
+  o = old->pflags & BGP_REF_SUPPRESSED;
   if (n > o)
     return 0;
   if (n < o)
@@ -2039,21 +2048,18 @@ bgp_rte_better(rte *new, rte *old)
 int
 bgp_rte_mergable(rte *pri, rte *sec)
 {
-  struct bgp_proto *pri_bgp = (struct bgp_proto *) pri->attrs->src->proto;
-  struct bgp_proto *sec_bgp = (struct bgp_proto *) sec->attrs->src->proto;
+  struct bgp_proto *pri_bgp = (struct bgp_proto *) pri->src->proto;
+  struct bgp_proto *sec_bgp = (struct bgp_proto *) sec->src->proto;
   eattr *x, *y;
   u32 p, s;
 
   /* Skip suppressed routes (see bgp_rte_recalculate()) */
-  if (pri->u.bgp.suppressed != sec->u.bgp.suppressed)
+  /* LLGR draft - depreference stale routes */
+  if (pri->pflags != sec->pflags)
     return 0;
 
   /* RFC 4271 9.1.2.1. Route resolvability test */
   if (rte_resolvable(pri) != rte_resolvable(sec))
-    return 0;
-
-  /* LLGR draft - depreference stale routes */
-  if (rte_stale(pri) != rte_stale(sec))
     return 0;
 
   /* Start with local preferences */
@@ -2118,13 +2124,13 @@ bgp_rte_mergable(rte *pri, rte *sec)
 static inline int
 same_group(rte *r, u32 lpref, u32 lasn)
 {
-  return (r->pref == lpref) && (bgp_get_neighbor(r) == lasn);
+  return (r->attrs->pref == lpref) && (bgp_get_neighbor(r) == lasn);
 }
 
 static inline int
 use_deterministic_med(rte *r)
 {
-  struct proto *P = r->attrs->src->proto;
+  struct proto *P = r->src->proto;
   return (P->proto == &proto_bgp) && ((struct bgp_proto *) P)->cf->deterministic_med;
 }
 
@@ -2133,9 +2139,9 @@ bgp_rte_recalculate(rtable *table, net *net, rte *new, rte *old, rte *old_best)
 {
   rte *r, *s;
   rte *key = new ? new : old;
-  u32 lpref = key->pref;
+  u32 lpref = key->attrs->pref;
   u32 lasn = bgp_get_neighbor(key);
-  int old_suppressed = old ? old->u.bgp.suppressed : 0;
+  int old_suppressed = old ? !!(old->pflags & BGP_REF_SUPPRESSED) : 0;
 
   /*
    * Proper RFC 4271 path selection is a bit complicated, it cannot be
@@ -2187,11 +2193,11 @@ bgp_rte_recalculate(rtable *table, net *net, rte *new, rte *old, rte *old_best)
    */
 
   if (new)
-    new->u.bgp.suppressed = 1;
+    new->pflags |= BGP_REF_SUPPRESSED;
 
   if (old)
   {
-    old->u.bgp.suppressed = 1;
+    old->pflags |= BGP_REF_SUPPRESSED;
 
     /* The fast case - replace not best with worse (or remove not best) */
     if (old_suppressed && !(new && bgp_rte_better(new, old)))
@@ -2203,7 +2209,7 @@ bgp_rte_recalculate(rtable *table, net *net, rte *new, rte *old, rte *old_best)
   for (s=net->routes; rte_is_valid(s); s=s->next)
     if (use_deterministic_med(s) && same_group(s, lpref, lasn))
     {
-      s->u.bgp.suppressed = 1;
+      s->pflags |= BGP_REF_SUPPRESSED;
       if (!r || bgp_rte_better(s, r))
 	r = s;
     }
@@ -2214,16 +2220,16 @@ bgp_rte_recalculate(rtable *table, net *net, rte *new, rte *old, rte *old_best)
 
   /* Found if new is mergable with best-in-group */
   if (new && (new != r) && bgp_rte_mergable(r, new))
-    new->u.bgp.suppressed = 0;
+    new->pflags &= ~BGP_REF_SUPPRESSED;
 
   /* Found all existing routes mergable with best-in-group */
   for (s=net->routes; rte_is_valid(s); s=s->next)
     if (use_deterministic_med(s) && same_group(s, lpref, lasn))
       if ((s != r) && bgp_rte_mergable(r, s))
-	s->u.bgp.suppressed = 0;
+	s->pflags &= ~BGP_REF_SUPPRESSED;
 
   /* Found best-in-group */
-  r->u.bgp.suppressed = 0;
+  r->pflags &= ~BGP_REF_SUPPRESSED;
 
   /*
    * There are generally two reasons why we have to force
@@ -2271,7 +2277,7 @@ bgp_rte_modify_stale(struct rte *r, struct linpool *pool)
   r = rte_cow_rta(r, pool);
   bgp_set_attr_ptr(&(r->attrs->eattrs), pool, BA_COMMUNITY, flags,
 		   int_set_add(pool, ad, BGP_COMM_LLGR_STALE));
-  r->u.bgp.stale = 1;
+  r->pflags |= BGP_REF_STALE;
 
   return r;
 }
@@ -2356,9 +2362,9 @@ bgp_get_route_info(rte *e, byte *buf)
   eattr *o = ea_find(e->attrs->eattrs, EA_CODE(PROTOCOL_BGP, BA_ORIGIN));
   u32 origas;
 
-  buf += bsprintf(buf, " (%d", e->pref);
+  buf += bsprintf(buf, " (%d", e->attrs->pref);
 
-  if (e->u.bgp.suppressed)
+  if (e->pflags & BGP_REF_SUPPRESSED)
     buf += bsprintf(buf, "-");
 
   if (rte_stale(e))

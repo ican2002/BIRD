@@ -144,7 +144,7 @@ orta_compare(const struct ospf_proto *p, const orta *new, const orta *old)
 {
   int r;
 
-  if (old->type == RTS_DUMMY)
+  if (!old->type)
     return 1;
 
   /* Prefer intra-area to inter-area to externals */
@@ -195,7 +195,7 @@ orta_compare_asbr(const struct ospf_proto *p, const orta *new, const orta *old)
 {
   int r;
 
-  if (old->type == RTS_DUMMY)
+  if (!old->type)
     return 1;
 
   if (!p->rfc1583)
@@ -225,7 +225,7 @@ orta_compare_ext(const struct ospf_proto *p, const orta *new, const orta *old)
 {
   int r;
 
-  if (old->type == RTS_DUMMY)
+  if (!old->type)
     return 1;
 
   /* 16.4 (6a) - prefer routes with lower type */
@@ -2047,36 +2047,66 @@ again1:
     if (nf->n.type) /* Add the route */
     {
       rta a0 = {
-	.src = p->p.main_source,
 	.source = nf->n.type,
 	.scope = SCOPE_UNIVERSE,
 	.dest = RTD_UNICAST,
 	.nh = *(nf->n.nhs),
+	.pref = p->p.main_channel->preference,
       };
 
       if (reload || ort_changed(nf, &a0))
       {
-	rta *a = rta_lookup(&a0);
-	rte *e = rte_get_temp(a);
+	_Bool have_metric2 = (nf->n.type == RTS_OSPF_EXT2);
+	_Bool have_tag = (((nf->n.type == RTS_OSPF_EXT1) || (nf->n.type == RTS_OSPF_EXT2)) && nf->n.tag);
+	_Bool have_router_id = !!nf->n.rid;
+
+	a0.eattrs = alloca(sizeof(ea_list) + (1 + have_metric2 + have_tag + have_router_id) * sizeof(eattr));
+	memset(a0.eattrs, 0, sizeof(ea_list));
+
+	nf->old_metric1 = nf->n.metric1;
+	nf->old_metric2 = nf->n.metric2;
+	nf->old_tag = nf->n.tag;
+	nf->old_rid = nf->n.rid;
+
+	a0.eattrs->attrs[a0.eattrs->count++] = (eattr) {
+	  .id = EA_OSPF_METRIC1,
+	  .type = EAF_TYPE_INT,
+	  .u.data = nf->n.metric1,
+	};
+
+	if (have_metric2)
+	  a0.eattrs->attrs[a0.eattrs->count++] = (eattr) {
+	    .id = EA_OSPF_METRIC2,
+	    .type = EAF_TYPE_INT,
+	    .u.data = nf->n.metric2,
+	  };
+
+	if (have_tag)
+	  a0.eattrs->attrs[a0.eattrs->count++] = (eattr) {
+	    .id = EA_OSPF_TAG,
+	    .type = EAF_TYPE_INT,
+	    .u.data = nf->n.tag,
+	  };
+
+	if (have_router_id)
+	  a0.eattrs->attrs[a0.eattrs->count++] = (eattr) {
+	    .id = EA_OSPF_ROUTER_ID,
+	    .type = EAF_TYPE_ROUTER_ID,
+	    .u.data = nf->n.rid,
+	  };
+
+	rte e0 = {
+	  .attrs = rta_lookup(&a0),
+	  .src = p->p.main_source,
+	};
 
 	rta_free(nf->old_rta);
-	nf->old_rta = rta_clone(a);
-	e->u.ospf.metric1 = nf->old_metric1 = nf->n.metric1;
-	e->u.ospf.metric2 = nf->old_metric2 = nf->n.metric2;
-	e->u.ospf.tag = nf->old_tag = nf->n.tag;
-	e->u.ospf.router_id = nf->old_rid = nf->n.rid;
-	e->pflags = EA_ID_FLAG(EA_OSPF_METRIC1) | EA_ID_FLAG(EA_OSPF_ROUTER_ID);
-
-	if (nf->n.type == RTS_OSPF_EXT2)
-	  e->pflags |= EA_ID_FLAG(EA_OSPF_METRIC2);
-
-	/* Perhaps onfly if tag is non-zero? */
-	if ((nf->n.type == RTS_OSPF_EXT1) || (nf->n.type == RTS_OSPF_EXT2))
-	  e->pflags |= EA_ID_FLAG(EA_OSPF_TAG);
+	nf->old_rta = rta_clone(e0.attrs);
 
 	DBG("Mod rte type %d - %N via %I on iface %s, met %d\n",
 	    a0.source, nf->fn.addr, a0.gw, a0.iface ? a0.iface->name : "(none)", nf->n.metric1);
-	rte_update(&p->p, nf->fn.addr, e);
+
+	rte_update(p->p.main_channel, nf->fn.addr, &e0);
       }
     }
     else if (nf->old_rta)
@@ -2085,7 +2115,7 @@ again1:
       rta_free(nf->old_rta);
       nf->old_rta = NULL;
 
-      rte_update(&p->p, nf->fn.addr, NULL);
+      rte_withdraw(p->p.main_channel, nf->fn.addr, p->p.main_source);
     }
 
     /* Remove unused rt entry, some special entries are persistent */
@@ -2100,7 +2130,6 @@ again1:
     }
   }
   FIB_ITERATE_END;
-
 
   WALK_LIST(oa, p->area_list)
   {
