@@ -35,7 +35,6 @@
 #include <poll.h>
 #include <pthread.h>
 #include <semaphore.h>
-#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
